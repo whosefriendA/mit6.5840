@@ -135,12 +135,18 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 // field names must start with capital letters!
 type RequestVoteArgs struct {
 	// Your data here (3A, 3B).
+	Term         int
+	CandidateId  int
+	LastLogIndex int
+	lastLogTerm  int
 }
 
 // example RequestVote RPC reply structure.
 // field names must start with capital letters!
 type RequestVoteReply struct {
 	// Your data here (3A).
+	Term        int
+	VoteGranted bool
 }
 
 type AppendEntriesArgs struct {
@@ -156,9 +162,53 @@ type AppendEntriesReply struct {
 	Success bool
 }
 
+func (rf *Raft) broadcastRequestVoteEntries() {
+	rf.mu.Lock()
+	args := RequestVoteArgs{}
+	rf.currentTerm++
+	args.Term = rf.currentTerm
+	args.CandidateId = rf.me
+	args.LastLogIndex = len(rf.log)
+	args.lastLogTerm = rf.currentTerm - 1
+	var votemap map[int]bool
+	rf.mu.Unlock()
+	for i := 0; i < len(rf.peers); i++ {
+		if i != rf.me {
+			go func(server int, args RequestVoteArgs) {
+				var reply RequestVoteReply
+				if rf.sendRequestVote(server, &args, &reply) {
+					rf.handleRequestVoteReply(server, votemap, &args, &reply)
+				}
+			}(i, args)
+		}
+	}
+}
+func (rf *Raft) handleRequestVoteReply(server int, votemap map[int]bool, args *RequestVoteArgs, reply *RequestVoteReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if reply.VoteGranted {
+		votemap[server] = true
+	}
+	num := 0
+	for _, n := range votemap {
+		if n {
+			num++
+		}
+	}
+	if num >= len(rf.peers) {
+
+	}
+}
+
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (3A, 3B).
+	if args.Term < rf.currentTerm {
+		reply.VoteGranted = false
+	}
+	if rf.votedFor == 0 || rf.votedFor == args.CandidateId {
+		reply.VoteGranted = true
+	}
 }
 
 // 向服务器发送 RequestVote RPC 的示例代码。
@@ -184,26 +234,18 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	return ok
 }
-func (rf *Raft) broadcastAppendEntries() {
+func (rf *Raft) broadcastAppendEntriesEntries() {
 	rf.mu.Lock()
-	currentTerm := rf.currentTerm
-	leaderId := rf.me
-	prevLogIndex := len(rf.log) - 1
-	prevLogTerm := rf.log[prevLogIndex].Term
-	entries := []LogEntry{}
-	leaderCommit := rf.commitIndex
+	args := AppendEntriesArgs{}
+	args.Term = rf.currentTerm
+	args.LeaderId = rf.me
+	args.PrevLogIndex = len(rf.log) - 1
+	args.PrevLogTerm = rf.log[args.PrevLogIndex].Term
+	args.Entries = []LogEntry{}
+	args.LeaderCommit = rf.commitIndex
 	rf.mu.Unlock()
-	// 向所有其他节点发送 AppendEntries RPC
 	for i := 0; i < len(rf.peers); i++ {
 		if i != rf.me {
-			args := AppendEntriesArgs{
-				Term:         currentTerm,
-				LeaderId:     leaderId,
-				PrevLogIndex: prevLogIndex,
-				PrevLogTerm:  prevLogTerm,
-				Entries:      entries,
-				LeaderCommit: leaderCommit,
-			}
 			go func(server int, args AppendEntriesArgs) {
 				var reply AppendEntriesReply
 				if rf.sendAppendEntries(server, &args, &reply) {
@@ -221,7 +263,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 func (rf *Raft) handleAppendEntriesReply(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	//领导人过时，退化为跟随者
+	//领导人变为跟随者
 	if reply.Term > rf.currentTerm {
 		rf.currentTerm = reply.Term
 		rf.votedFor = -1
@@ -238,13 +280,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Term = rf.currentTerm
 		return
 	}
+	rf.voteticker.Reset(500 * time.Millisecond)
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
 		rf.rfstate = Follower
 	}
-	//rf.resetElectionTimer()
-
 	if args.PrevLogIndex >= len(rf.log) || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
 		reply.Term = rf.currentTerm
 		reply.Success = false
@@ -310,7 +351,7 @@ func (rf *Raft) ticker() {
 		// Your code here (3A)
 		// Check if a leader election should be started.
 		for range rf.voteticker.C {
-			rf.sendRequestVote(rf.me)
+			rf.broadcastRequestVoteEntries()
 		}
 		// pause for a random amount of time between 50 and 350
 		// milliseconds.
