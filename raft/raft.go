@@ -85,6 +85,12 @@ func (rf *Raft) GetState() (int, bool) {
 	var term int
 	var isleader bool
 	// Your code here (3A).
+	term = rf.currentTerm
+	if rf.rfstate == Leader {
+		isleader = true
+	} else {
+		isleader = false
+	}
 	return term, isleader
 }
 
@@ -179,6 +185,9 @@ func (rf *Raft) broadcastRequestVoteEntries() {
 	votemap := make(map[int]bool)
 	rf.mu.Unlock()
 	for i := 0; i < len(rf.peers); i++ {
+		if rf.rfstate != Candidate {
+			return
+		}
 		if i != rf.me {
 			go func(server int, args RequestVoteArgs) {
 				var reply RequestVoteReply
@@ -190,33 +199,45 @@ func (rf *Raft) broadcastRequestVoteEntries() {
 	}
 
 }
-func (rf *Raft) handleRequestVoteReply(server int, votemap map[int]bool, args *RequestVoteArgs, reply *RequestVoteReply) {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	if reply.VoteGranted {
-		votemap[server] = true
-	}
-	num := 0
-	for _, n := range votemap {
-		if n {
-			num++
-		}
-	}
-	if num >= len(rf.peers)/2 {
-		log.Printf("new leader was voted")
-		rf.rfstate = Leader
-		go rf.broadcastAppendEntriesEntries()
-	}
+func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
+	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+	return ok
 }
 
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (3A, 3B).
 	if args.Term < rf.currentTerm {
+		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
+		return
 	}
-	if rf.votedFor == 0 || rf.votedFor == args.CandidateId {
+	if rf.votedFor == -1 || rf.votedFor == args.CandidateId {
 		reply.VoteGranted = true
+	}
+}
+func (rf *Raft) handleRequestVoteReply(server int, votemap map[int]bool, args *RequestVoteArgs, reply *RequestVoteReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if reply.Term >= rf.currentTerm {
+		rf.currentTerm = reply.Term
+		rf.rfstate = Follower
+		return
+	}
+	if reply.VoteGranted {
+		votemap[server] = true
+	}
+	num := 1
+	for _, n := range votemap {
+		if n {
+			num++
+		}
+	}
+	//log.Printf("len of peers %d num %d", len(rf.peers), num)
+	if num >= len(rf.peers)/2 && rf.rfstate == Candidate {
+		log.Printf("new leader was voted")
+		rf.rfstate = Leader
+		go rf.broadcastAppendEntriesEntries()
 	}
 }
 
@@ -238,11 +259,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 // 如果 RPC 有问题，请检查传递的结构体字段名是否首字母大写，
 // 并确保调用者使用 & 传递回复结构体的地址，而不是直接传递结构体。
-
-func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
-	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
-	return ok
-}
 func (rf *Raft) broadcastAppendEntriesEntries() {
 	for {
 		rf.mu.Lock()
@@ -299,7 +315,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 	rf.lastheartbeat = time.Now()
-	if args.Term > rf.currentTerm {
+	if args.Term >= rf.currentTerm {
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
 		rf.rfstate = Follower
@@ -366,7 +382,8 @@ func (rf *Raft) killed() bool {
 func (rf *Raft) ticker() {
 	for rf.killed() == false {
 		//log.Printf("current term: %d rfstate : %d", rf.currentTerm, rf.rfstate)
-		timeout := 300 * time.Millisecond
+		ms := 50 + (rand.Int63() % 300)
+		timeout := (time.Duration(ms) + 3000) * time.Millisecond
 		if time.Since(rf.lastheartbeat) > timeout {
 			rf.mu.Lock()
 			if rf.rfstate == Follower {
@@ -379,7 +396,7 @@ func (rf *Raft) ticker() {
 		}
 		// pause for a random amount of time between 50 and 350
 		// milliseconds.
-		ms := 50 + (rand.Int63() % 300)
+
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 	}
 }
@@ -401,7 +418,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// Your initialization code here (3A, 3B, 3C).
 	rf.rfstate = Follower
 	rf.currentTerm = 0
-	rf.votedFor = 0
+	rf.votedFor = -1
 	rf.log = make([]LogEntry, 0)
 	rf.lastApplied = 0
 	rf.lastheartbeat = time.Now()
