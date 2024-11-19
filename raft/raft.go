@@ -175,13 +175,13 @@ func (rf *Raft) broadcastRequestVoteEntries() {
 	args := RequestVoteArgs{}
 	args.Term = rf.currentTerm
 	args.CandidateId = rf.me
-	args.LastLogIndex = len(rf.log) - 1
-	if args.LastLogIndex >= 0 {
+	if len(rf.log) > 0 {
+		args.LastLogIndex = len(rf.log) - 1
 		args.LastLogTerm = rf.log[args.LastLogIndex].Term
 	} else {
-		args.LastLogTerm = 0
+		args.LastLogIndex = -1
+		args.LastLogTerm = -1
 	}
-
 	votemap := make(map[int]bool)
 	rf.mu.Unlock()
 	for i := 0; i < len(rf.peers); i++ {
@@ -212,6 +212,10 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.VoteGranted = false
 		return
 	}
+	if args.LastLogIndex >= 0 && args.LastLogTerm < rf.log[args.LastLogIndex].Term && args.LastLogIndex < len(rf.log)-1 {
+		reply.VoteGranted = false
+		return
+	}
 	if rf.votedFor == -1 || rf.votedFor == args.CandidateId {
 		reply.VoteGranted = true
 	}
@@ -237,7 +241,7 @@ func (rf *Raft) handleRequestVoteReply(server int, votemap map[int]bool, args *R
 	if num >= len(rf.peers)/2 && rf.rfstate == Candidate {
 		log.Printf("new leader was voted")
 		rf.rfstate = Leader
-		go rf.broadcastAppendEntriesEntries()
+		go rf.broadcastAppendEntriesEntries(false, []LogEntry{})
 	}
 }
 
@@ -259,7 +263,7 @@ func (rf *Raft) handleRequestVoteReply(server int, votemap map[int]bool, args *R
 
 // 如果 RPC 有问题，请检查传递的结构体字段名是否首字母大写，
 // 并确保调用者使用 & 传递回复结构体的地址，而不是直接传递结构体。
-func (rf *Raft) broadcastAppendEntriesEntries() {
+func (rf *Raft) broadcastAppendEntriesEntries(isheartbeat bool, entries []LogEntry) {
 	for {
 		rf.mu.Lock()
 		//log.Printf("heart beat")
@@ -272,9 +276,13 @@ func (rf *Raft) broadcastAppendEntriesEntries() {
 		if len(rf.log) > 0 {
 			args.PrevLogIndex = len(rf.log) - 1
 			args.PrevLogTerm = rf.log[args.PrevLogIndex].Term
+		} else {
+			args.PrevLogIndex = -1
+			args.PrevLogTerm = -1
 		}
-		args.Entries = []LogEntry{}
+		args.Entries = entries
 		args.LeaderCommit = rf.commitIndex
+
 		rf.mu.Unlock()
 		for i := 0; i < len(rf.peers); i++ {
 			if i != rf.me {
@@ -285,6 +293,9 @@ func (rf *Raft) broadcastAppendEntriesEntries() {
 					}
 				}(i, args)
 			}
+		}
+		if !isheartbeat {
+			return
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
@@ -353,8 +364,19 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := -1
 	term := -1
-	isLeader := true
+	isLeader := false
+	if rf.rfstate == Leader {
+		isLeader = true
+	}
+	if isLeader {
+		newlog := LogEntry{
+			Term:         rf.currentTerm,
+			Command:      command,
+			CommandIndex: len(rf.log),
+		}
+		rf.log = append(rf.log, newlog)
 
+	}
 	// Your code here (3B).
 
 	return index, term, isLeader
