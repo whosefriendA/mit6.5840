@@ -331,7 +331,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.votedFor = -1
 		rf.rfstate = Follower
 	}
-	if args.PrevLogIndex >= len(rf.log) || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+	if args.PrevLogIndex >= len(rf.log) || args.PrevLogIndex < 0 || (args.PrevLogIndex >= 0 && rf.log[args.PrevLogIndex].Term != args.PrevLogTerm) {
 		reply.Term = rf.currentTerm
 		reply.Success = false
 		return
@@ -375,10 +375,10 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 			CommandIndex: len(rf.log),
 		}
 		rf.log = append(rf.log, newlog)
-
+		term = rf.commitIndex
+		index = len(rf.log) - 1
 	}
 	// Your code here (3B).
-
 	return index, term, isLeader
 }
 
