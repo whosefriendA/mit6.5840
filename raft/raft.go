@@ -242,7 +242,11 @@ func (rf *Raft) handleRequestVoteReply(server int, votemap map[int]bool, args *R
 	if num >= len(rf.peers)/2 && rf.rfstate == Candidate {
 		log.Printf("new leader was voted")
 		rf.rfstate = Leader
-		go rf.broadcastAppendEntriesEntries(false, []LogEntry{})
+		rf.matchIndex = make([]int, len(rf.peers))
+		for i := 0; i < len(rf.peers); i++ {
+			rf.nextIndex = append(rf.nextIndex, len(rf.log))
+		}
+		go rf.broadcastAppendEntriesEntries()
 	}
 }
 
@@ -264,7 +268,7 @@ func (rf *Raft) handleRequestVoteReply(server int, votemap map[int]bool, args *R
 
 // 如果 RPC 有问题，请检查传递的结构体字段名是否首字母大写，
 // 并确保调用者使用 & 传递回复结构体的地址，而不是直接传递结构体。
-func (rf *Raft) broadcastAppendEntriesEntries(isheartbeat bool, entries []LogEntry) {
+func (rf *Raft) broadcastAppendEntriesEntries() {
 	for {
 		rf.mu.Lock()
 		//log.Printf("heart beat")
@@ -274,19 +278,31 @@ func (rf *Raft) broadcastAppendEntriesEntries(isheartbeat bool, entries []LogEnt
 		args := AppendEntriesArgs{}
 		args.Term = rf.currentTerm
 		args.LeaderId = rf.me
-		if len(rf.log) > 0 {
-			args.PrevLogIndex = len(rf.log) - 1
-			args.PrevLogTerm = rf.log[args.PrevLogIndex].Term
-		} else {
+		if len(rf.log) <= 0 {
 			args.PrevLogIndex = -1
 			args.PrevLogTerm = -1
 		}
-		args.Entries = entries
 		args.LeaderCommit = rf.commitIndex
-
 		rf.mu.Unlock()
 		for i := 0; i < len(rf.peers); i++ {
 			if i != rf.me {
+				if len(rf.log) > 0 {
+					rf.mu.Lock()
+					//log.Printf("broad nextindex %d", rf.nextIndex[i])
+					nextIndex := rf.nextIndex[i]
+					if nextIndex > 0 {
+						args.PrevLogIndex = nextIndex - 1
+						//log.Printf("broad Prevlogindex %d", args.PrevLogIndex)
+						args.PrevLogTerm = rf.log[args.PrevLogIndex].Term
+					}
+					if nextIndex < len(rf.log) {
+						//log.Printf("broad nextindex %d", nextIndex)
+						args.Entries = rf.log[nextIndex:]
+					} else {
+						args.Entries = nil
+					}
+					rf.mu.Unlock()
+				}
 				go func(server int, args AppendEntriesArgs) {
 					var reply AppendEntriesReply
 					if rf.sendAppendEntries(server, &args, &reply) {
@@ -294,9 +310,6 @@ func (rf *Raft) broadcastAppendEntriesEntries(isheartbeat bool, entries []LogEnt
 					}
 				}(i, args)
 			}
-		}
-		if !isheartbeat {
-			return
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
@@ -315,6 +328,33 @@ func (rf *Raft) handleAppendEntriesReply(server int, args *AppendEntriesArgs, re
 		rf.votedFor = -1
 		rf.rfstate = Follower
 		return
+	}
+	if reply.Success && args.PrevLogIndex >= 0 {
+		//log.Printf("handle nextindex %d", rf.nextIndex[server])
+		rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
+		rf.nextIndex[server] = rf.matchIndex[server] + 1
+		// 尝试更新Leader的commitIndex
+		rf.updateCommitIndex()
+	} else if !reply.Success && args.PrevLogIndex >= 0 {
+		if rf.nextIndex[server] >= 1 {
+			rf.nextIndex[server] = rf.nextIndex[server] - 1
+		} else {
+			rf.nextIndex[server] = 1
+		}
+	}
+}
+func (rf *Raft) updateCommitIndex() {
+	n := len(rf.log)
+	for i := rf.commitIndex + 1; i < n; i++ {
+		count := 1
+		for j := 0; j < len(rf.peers); j++ {
+			if j != rf.me && rf.matchIndex[j] >= i && rf.log[i].Term == rf.currentTerm {
+				count++
+			}
+		}
+		if count > len(rf.peers)/2 {
+			rf.commitIndex = i
+		}
 	}
 }
 
@@ -341,7 +381,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	conflictIndex := args.PrevLogIndex + 1
 	rf.log = rf.log[:conflictIndex]
 	// 添加新条目
-	rf.log = append(rf.log, args.Entries...)
+	if args.Entries != nil {
+		rf.log = append(rf.log, args.Entries...)
+	}
 	if args.LeaderCommit > rf.commitIndex {
 		if args.LeaderCommit <= len(rf.log)-1 {
 			rf.commitIndex = args.LeaderCommit
@@ -376,7 +418,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 			CommandIndex: len(rf.log),
 		}
 		rf.log = append(rf.log, newlog)
-		term = rf.commitIndex
+		term = rf.currentTerm
 		index = len(rf.log) - 1
 	}
 	// Your code here (3B).
@@ -406,7 +448,7 @@ func (rf *Raft) ticker() {
 	for rf.killed() == false {
 		//log.Printf("current term: %d rfstate : %d", rf.currentTerm, rf.rfstate)
 		ms := 50 + (rand.Int63() % 300)
-		timeout := (time.Duration(ms) + 3000) * time.Millisecond
+		timeout := (time.Duration(ms) + 2000) * time.Millisecond
 		if time.Since(rf.lastheartbeat) > timeout {
 			rf.mu.Lock()
 			if rf.rfstate == Follower {
