@@ -197,9 +197,7 @@ func (rf *Raft) broadcastRequestVoteEntries() {
 			}(i, args)
 		}
 	}
-
 }
-
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	return ok
@@ -242,11 +240,14 @@ func (rf *Raft) handleRequestVoteReply(server int, votemap map[int]bool, args *R
 	if num >= len(rf.peers)/2 && rf.rfstate == Candidate {
 		log.Printf("new leader was voted")
 		rf.rfstate = Leader
+		rf.nextIndex = make([]int, len(rf.peers))
 		rf.matchIndex = make([]int, len(rf.peers))
 		for i := 0; i < len(rf.peers); i++ {
-			rf.nextIndex = append(rf.nextIndex, len(rf.log))
+			if i != rf.me {
+				rf.nextIndex[i] = len(rf.log)
+			}
 		}
-		go rf.broadcastAppendEntriesEntries()
+		go rf.broadcastAppendEntries()
 	}
 }
 
@@ -268,7 +269,7 @@ func (rf *Raft) handleRequestVoteReply(server int, votemap map[int]bool, args *R
 
 // 如果 RPC 有问题，请检查传递的结构体字段名是否首字母大写，
 // 并确保调用者使用 & 传递回复结构体的地址，而不是直接传递结构体。
-func (rf *Raft) broadcastAppendEntriesEntries() {
+func (rf *Raft) broadcastAppendEntries() {
 	for {
 		rf.mu.Lock()
 		//log.Printf("heart beat")
@@ -279,8 +280,8 @@ func (rf *Raft) broadcastAppendEntriesEntries() {
 		args.Term = rf.currentTerm
 		args.LeaderId = rf.me
 		if len(rf.log) <= 0 {
-			args.PrevLogIndex = -1
-			args.PrevLogTerm = -1
+			args.PrevLogIndex = -2
+			args.PrevLogTerm = -2
 		}
 		args.LeaderCommit = rf.commitIndex
 		rf.mu.Unlock()
@@ -290,10 +291,12 @@ func (rf *Raft) broadcastAppendEntriesEntries() {
 					rf.mu.Lock()
 					//log.Printf("broad nextindex %d", rf.nextIndex[i])
 					nextIndex := rf.nextIndex[i]
-					if nextIndex > 0 {
+					if nextIndex >= 0 {
 						args.PrevLogIndex = nextIndex - 1
 						//log.Printf("broad Prevlogindex %d", args.PrevLogIndex)
-						args.PrevLogTerm = rf.log[args.PrevLogIndex].Term
+						if args.PrevLogIndex > -1 {
+							args.PrevLogTerm = rf.log[args.PrevLogIndex].Term
+						}
 					}
 					if nextIndex < len(rf.log) {
 						//log.Printf("broad nextindex %d", nextIndex)
@@ -329,12 +332,15 @@ func (rf *Raft) handleAppendEntriesReply(server int, args *AppendEntriesArgs, re
 		rf.rfstate = Follower
 		return
 	}
-	if reply.Success && args.PrevLogIndex >= 0 {
-		//log.Printf("handle nextindex %d", rf.nextIndex[server])
+	if reply.Success && args.PrevLogIndex >= -1 {
+		log.Printf("handle nextindex  %d    %d", server, rf.nextIndex[server])
+		log.Printf("len %d", len(args.Entries))
 		rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
 		rf.nextIndex[server] = rf.matchIndex[server] + 1
 		// 尝试更新Leader的commitIndex
+		log.Printf("commitindex %d", rf.commitIndex)
 		rf.updateCommitIndex()
+		log.Printf("commitindex %d", rf.commitIndex)
 	} else if !reply.Success && args.PrevLogIndex >= 0 {
 		if rf.nextIndex[server] >= 1 {
 			rf.nextIndex[server] = rf.nextIndex[server] - 1
@@ -372,16 +378,18 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.votedFor = -1
 		rf.rfstate = Follower
 	}
-	if args.PrevLogIndex >= len(rf.log) || args.PrevLogIndex < 0 || (args.PrevLogIndex >= 0 && rf.log[args.PrevLogIndex].Term != args.PrevLogTerm) {
+	if args.PrevLogIndex >= len(rf.log) || args.PrevLogIndex < -1 || (args.PrevLogIndex >= 0 && rf.log[args.PrevLogIndex].Term != args.PrevLogTerm) {
 		reply.Term = rf.currentTerm
 		reply.Success = false
 		return
 	}
+
 	// 冲突,删除它和之后的所有条目
 	conflictIndex := args.PrevLogIndex + 1
 	rf.log = rf.log[:conflictIndex]
 	// 添加新条目
 	if args.Entries != nil {
+		log.Printf("hhhhhhhhhhhhhhhhhh")
 		rf.log = append(rf.log, args.Entries...)
 	}
 	if args.LeaderCommit > rf.commitIndex {
@@ -412,6 +420,11 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		isLeader = true
 	}
 	if isLeader {
+		for i := 0; i < len(rf.peers); i++ {
+			if i != rf.me {
+				rf.nextIndex[i] = len(rf.log)
+			}
+		}
 		newlog := LogEntry{
 			Term:         rf.currentTerm,
 			Command:      command,
@@ -482,6 +495,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// Your initialization code here (3A, 3B, 3C).
 	rf.rfstate = Follower
+	rf.commitIndex = -1
 	rf.currentTerm = 0
 	rf.votedFor = -1
 	rf.log = make([]LogEntry, 0)
