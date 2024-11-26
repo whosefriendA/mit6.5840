@@ -14,6 +14,7 @@ package raft
 //   每个 Raft 节点都应在相同的服务器中将 ApplyMsg 发送给服务（或测试器）。
 
 import (
+	"fmt"
 	"log"
 	//	"bytes"
 	"math/rand"
@@ -72,6 +73,7 @@ type Raft struct {
 	matchIndex    []int               //对于每一台服务器，已知的已经复制到该服务器的最高日志条目的索引（初始值为0，单调递增）
 	rfstate       state               //本状态机类型
 	lastheartbeat time.Time           //选举定时器
+	applyChan     chan ApplyMsg
 	// Your data here (3A, 3B, 3C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
@@ -170,6 +172,9 @@ type AppendEntriesReply struct {
 }
 
 func (rf *Raft) broadcastRequestVoteEntries() {
+	if rf.killed() {
+		return
+	}
 	log.Printf("vote begin")
 	rf.mu.Lock()
 	args := RequestVoteArgs{}
@@ -271,6 +276,9 @@ func (rf *Raft) handleRequestVoteReply(server int, votemap map[int]bool, args *R
 // 并确保调用者使用 & 传递回复结构体的地址，而不是直接传递结构体。
 func (rf *Raft) broadcastAppendEntries() {
 	for {
+		if rf.killed() {
+			return
+		}
 		rf.mu.Lock()
 		//log.Printf("heart beat")
 		if rf.rfstate != Leader {
@@ -279,10 +287,8 @@ func (rf *Raft) broadcastAppendEntries() {
 		args := AppendEntriesArgs{}
 		args.Term = rf.currentTerm
 		args.LeaderId = rf.me
-		if len(rf.log) <= 0 {
-			args.PrevLogIndex = -2
-			args.PrevLogTerm = -2
-		}
+		args.PrevLogIndex = 0
+		args.PrevLogTerm = 0
 		args.LeaderCommit = rf.commitIndex
 		rf.mu.Unlock()
 		for i := 0; i < len(rf.peers); i++ {
@@ -294,7 +300,7 @@ func (rf *Raft) broadcastAppendEntries() {
 					if nextIndex >= 0 {
 						args.PrevLogIndex = nextIndex - 1
 						//log.Printf("broad Prevlogindex %d", args.PrevLogIndex)
-						if args.PrevLogIndex > -1 {
+						if args.PrevLogIndex > 0 {
 							args.PrevLogTerm = rf.log[args.PrevLogIndex].Term
 						}
 					}
@@ -333,8 +339,8 @@ func (rf *Raft) handleAppendEntriesReply(server int, args *AppendEntriesArgs, re
 		return
 	}
 	if reply.Success && args.PrevLogIndex >= -1 {
-		log.Printf("handle nextindex  %d    %d", server, rf.nextIndex[server])
-		log.Printf("len %d", len(args.Entries))
+		//log.Printf("handle nextindex  %d    %d", server, rf.nextIndex[server])
+		//log.Printf("len %d", len(args.Entries))
 		rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
 		rf.nextIndex[server] = rf.matchIndex[server] + 1
 		// 尝试更新Leader的commitIndex
@@ -378,20 +384,20 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.votedFor = -1
 		rf.rfstate = Follower
 	}
-	if args.PrevLogIndex >= len(rf.log) || args.PrevLogIndex < -1 || (args.PrevLogIndex >= 0 && rf.log[args.PrevLogIndex].Term != args.PrevLogTerm) {
+	if args.PrevLogIndex >= len(rf.log) || args.PrevLogIndex < 0 || (args.PrevLogIndex >= 0 && rf.log[args.PrevLogIndex].Term != args.PrevLogTerm) {
 		reply.Term = rf.currentTerm
 		reply.Success = false
 		return
 	}
 
-	// 冲突,删除它和之后的所有条目
-	conflictIndex := args.PrevLogIndex + 1
-	rf.log = rf.log[:conflictIndex]
-	// 添加新条目
-	if args.Entries != nil {
-		log.Printf("hhhhhhhhhhhhhhhhhh")
+	if len(args.Entries) > 0 {
+		conflictIndex := args.PrevLogIndex + 1
+		if conflictIndex < len(rf.log) {
+			rf.log = rf.log[:conflictIndex]
+		}
 		rf.log = append(rf.log, args.Entries...)
 	}
+
 	if args.LeaderCommit > rf.commitIndex {
 		if args.LeaderCommit <= len(rf.log)-1 {
 			rf.commitIndex = args.LeaderCommit
@@ -399,9 +405,22 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			rf.commitIndex = len(rf.log) - 1
 		}
 	}
-
+	if rf.commitIndex > rf.lastApplied {
+		for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
+			applyMsg := ApplyMsg{
+				CommandValid: true,
+				Command:      rf.log[i].Command,
+				CommandIndex: i,
+			}
+			rf.applyChan <- applyMsg
+		}
+		rf.lastApplied = rf.commitIndex
+	}
 	reply.Term = rf.currentTerm
 	reply.Success = true
+	for i, v := range rf.log {
+		fmt.Printf("log  %d   is   %d", i, v)
+	}
 }
 
 // 使用 Raft 的服务（例如一个键值对服务器）希望开始对下一个要追加到 Raft 日志的命令达成一致。
@@ -416,6 +435,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := -1
 	term := -1
 	isLeader := false
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	if rf.rfstate == Leader {
 		isLeader = true
 	}
@@ -433,6 +454,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		rf.log = append(rf.log, newlog)
 		term = rf.currentTerm
 		index = len(rf.log) - 1
+		log.Printf("index %d", index)
 	}
 	// Your code here (3B).
 	return index, term, isLeader
@@ -494,8 +516,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here (3A, 3B, 3C).
+	rf.applyChan = applyCh
 	rf.rfstate = Follower
-	rf.commitIndex = -1
+	rf.commitIndex = 0
 	rf.currentTerm = 0
 	rf.votedFor = -1
 	rf.log = make([]LogEntry, 0)
