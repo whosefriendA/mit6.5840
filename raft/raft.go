@@ -45,9 +45,8 @@ type ApplyMsg struct {
 	SnapshotIndex int
 }
 type LogEntry struct {
-	Term         int
-	Command      interface{}
-	CommandIndex int
+	Term    int
+	Command interface{}
 }
 type state int
 
@@ -447,9 +446,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 			}
 		}
 		newlog := LogEntry{
-			Term:         rf.currentTerm,
-			Command:      command,
-			CommandIndex: len(rf.log),
+			Term:    rf.currentTerm,
+			Command: command,
 		}
 		rf.log = append(rf.log, newlog)
 		term = rf.currentTerm
