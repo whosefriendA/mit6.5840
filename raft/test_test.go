@@ -138,6 +138,7 @@ func TestBasicAgree3B(t *testing.T) {
 		}
 
 		xindex := cfg.one(index*100, servers, false)
+		//fmt.Printf("xindex %d\n", xindex)
 		if xindex != index {
 			t.Fatalf("got index %v but expected %v", xindex, index)
 		}

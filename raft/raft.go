@@ -14,7 +14,6 @@ package raft
 //   每个 Raft 节点都应在相同的服务器中将 ApplyMsg 发送给服务（或测试器）。
 
 import (
-	"fmt"
 	"log"
 	//	"bytes"
 	"math/rand"
@@ -248,7 +247,7 @@ func (rf *Raft) handleRequestVoteReply(server int, votemap map[int]bool, args *R
 		rf.matchIndex = make([]int, len(rf.peers))
 		for i := 0; i < len(rf.peers); i++ {
 			if i != rf.me {
-				rf.nextIndex[i] = len(rf.log)
+				rf.nextIndex[i] = len(rf.log) + 1
 			}
 		}
 		go rf.broadcastAppendEntries()
@@ -283,11 +282,13 @@ func (rf *Raft) broadcastAppendEntries() {
 		if rf.rfstate != Leader {
 			return
 		}
+		appendnums := 1
 		args := AppendEntriesArgs{}
 		args.Term = rf.currentTerm
 		args.LeaderId = rf.me
 		args.PrevLogIndex = 0
 		args.PrevLogTerm = 0
+		args.Entries = nil
 		args.LeaderCommit = rf.commitIndex
 		rf.mu.Unlock()
 		for i := 0; i < len(rf.peers); i++ {
@@ -296,25 +297,21 @@ func (rf *Raft) broadcastAppendEntries() {
 					rf.mu.Lock()
 					//log.Printf("broad nextindex %d", rf.nextIndex[i])
 					nextIndex := rf.nextIndex[i]
-					if nextIndex >= 0 {
+					if nextIndex > 0 {
 						args.PrevLogIndex = nextIndex - 1
 						//log.Printf("broad Prevlogindex %d", args.PrevLogIndex)
 						if args.PrevLogIndex > 0 {
-							args.PrevLogTerm = rf.log[args.PrevLogIndex].Term
+							args.PrevLogTerm = rf.log[args.PrevLogIndex-1].Term
 						}
 					}
-					if nextIndex < len(rf.log) {
-						//log.Printf("broad nextindex %d", nextIndex)
-						args.Entries = rf.log[nextIndex:]
-					} else {
-						args.Entries = nil
-					}
+					//log.Printf("broad nextindex %d", nextIndex)
+					args.Entries = rf.log[nextIndex-1:]
 					rf.mu.Unlock()
 				}
 				go func(server int, args AppendEntriesArgs) {
 					var reply AppendEntriesReply
 					if rf.sendAppendEntries(server, &args, &reply) {
-						rf.handleAppendEntriesReply(server, &args, &reply)
+						rf.handleAppendEntriesReply(server, &args, &reply, &appendnums)
 					}
 				}(i, args)
 			}
@@ -327,7 +324,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 	return rf.peers[server].Call("Raft.AppendEntries", args, reply)
 }
 
-func (rf *Raft) handleAppendEntriesReply(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) {
+func (rf *Raft) handleAppendEntriesReply(server int, args *AppendEntriesArgs, reply *AppendEntriesReply, appendnums *int) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	//领导人变为跟随者
@@ -337,15 +334,30 @@ func (rf *Raft) handleAppendEntriesReply(server int, args *AppendEntriesArgs, re
 		rf.rfstate = Follower
 		return
 	}
-	if reply.Success && args.PrevLogIndex >= -1 {
+	if reply.Success && reply.Term == rf.currentTerm && args.PrevLogIndex >= 0 {
 		//log.Printf("handle nextindex  %d    %d", server, rf.nextIndex[server])
 		//log.Printf("len %d", len(args.Entries))
+		if *appendnums <= len(rf.peers)/2 {
+			*appendnums++
+		}
 		rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
 		rf.nextIndex[server] = rf.matchIndex[server] + 1
 		// 尝试更新Leader的commitIndex
-		log.Printf("commitindex %d", rf.commitIndex)
-		rf.updateCommitIndex()
-		log.Printf("commitindex %d", rf.commitIndex)
+		//log.Printf("commitindex %d", rf.commitIndex)
+		if *appendnums > len(rf.peers)/2 {
+			*appendnums = 0
+			for rf.lastApplied < len(rf.log) {
+				rf.lastApplied++
+				applyMsg := ApplyMsg{
+					CommandValid: true,
+					Command:      rf.log[rf.lastApplied-1].Command,
+					CommandIndex: rf.lastApplied,
+				}
+				rf.applyChan <- applyMsg
+				rf.commitIndex = rf.lastApplied
+			}
+		}
+		//log.Printf("commitindex %d", rf.commitIndex)
 	} else if !reply.Success && args.PrevLogIndex >= 0 {
 		if rf.nextIndex[server] >= 1 {
 			rf.nextIndex[server] = rf.nextIndex[server] - 1
@@ -354,21 +366,6 @@ func (rf *Raft) handleAppendEntriesReply(server int, args *AppendEntriesArgs, re
 		}
 	}
 }
-func (rf *Raft) updateCommitIndex() {
-	n := len(rf.log)
-	for i := rf.commitIndex + 1; i < n; i++ {
-		count := 1
-		for j := 0; j < len(rf.peers); j++ {
-			if j != rf.me && rf.matchIndex[j] >= i && rf.log[i].Term == rf.currentTerm {
-				count++
-			}
-		}
-		if count > len(rf.peers)/2 {
-			rf.commitIndex = i
-		}
-	}
-}
-
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -383,32 +380,36 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.votedFor = -1
 		rf.rfstate = Follower
 	}
-	if args.PrevLogIndex >= len(rf.log) || args.PrevLogIndex < 0 || (args.PrevLogIndex >= 0 && rf.log[args.PrevLogIndex].Term != args.PrevLogTerm) {
+	if args.PrevLogIndex > len(rf.log) || args.PrevLogIndex < 0 || (args.PrevLogIndex > 0 && rf.log[args.PrevLogIndex-1].Term != args.PrevLogTerm) {
 		reply.Term = rf.currentTerm
 		reply.Success = false
 		return
 	}
-
 	if len(args.Entries) > 0 {
 		conflictIndex := args.PrevLogIndex + 1
-		if conflictIndex < len(rf.log) {
-			rf.log = rf.log[:conflictIndex]
+		if conflictIndex > len(rf.log) {
+			conflictIndex = len(rf.log)
 		}
-		rf.log = append(rf.log, args.Entries...)
+		for i := 0; i < len(args.Entries); i++ {
+			if conflictIndex+i >= len(rf.log) || rf.log[conflictIndex+i].Term != args.Entries[i].Term {
+				rf.log = append(rf.log[:conflictIndex+i], args.Entries[i:]...)
+				break
+			}
+		}
 	}
 
 	if args.LeaderCommit > rf.commitIndex {
-		if args.LeaderCommit <= len(rf.log)-1 {
+		if args.LeaderCommit <= len(rf.log) {
 			rf.commitIndex = args.LeaderCommit
 		} else {
-			rf.commitIndex = len(rf.log) - 1
+			rf.commitIndex = len(rf.log)
 		}
 	}
 	if rf.commitIndex > rf.lastApplied {
 		for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
 			applyMsg := ApplyMsg{
 				CommandValid: true,
-				Command:      rf.log[i].Command,
+				Command:      rf.log[i-1].Command,
 				CommandIndex: i,
 			}
 			rf.applyChan <- applyMsg
@@ -417,9 +418,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	reply.Term = rf.currentTerm
 	reply.Success = true
-	for i, v := range rf.log {
-		fmt.Printf("log  %d   is   %d", i, v)
-	}
+	//for i, v := range rf.log {
+	//	fmt.Printf("log  %d   is   %d", i, v)
+	//}
 }
 
 // 使用 Raft 的服务（例如一个键值对服务器）希望开始对下一个要追加到 Raft 日志的命令达成一致。
@@ -440,18 +441,13 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		isLeader = true
 	}
 	if isLeader {
-		for i := 0; i < len(rf.peers); i++ {
-			if i != rf.me {
-				rf.nextIndex[i] = len(rf.log)
-			}
-		}
 		newlog := LogEntry{
 			Term:    rf.currentTerm,
 			Command: command,
 		}
 		rf.log = append(rf.log, newlog)
 		term = rf.currentTerm
-		index = len(rf.log) - 1
+		index = len(rf.log)
 		log.Printf("index %d", index)
 	}
 	// Your code here (3B).
@@ -507,6 +503,7 @@ func (rf *Raft) ticker() {
 
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
+
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
 	rf := &Raft{}
 	rf.peers = peers
@@ -530,3 +527,42 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	return rf
 }
+
+//if len(rf.log) > 0 && rf.commitIndex < len(rf.log)-1 {
+//	for i := len(rf.log) - 1; i > rf.commitIndex; i-- {
+//		count := 1
+//		for j := 0; j < len(rf.peers); j++ {
+//			if j != rf.me && rf.matchIndex[j] >= i {
+//				count++
+//			}
+//		}
+//		if count > len(rf.peers)/2 && rf.log[i].Term == rf.currentTerm {
+//			rf.commitIndex = i
+//			break
+//		}
+//	}
+//}
+//if rf.commitIndex == 0 && len(rf.log) == 1 && rf.log[0].Term == rf.currentTerm {
+//	count := 1
+//	for j := 0; j < len(rf.peers); j++ {
+//		if j != rf.me && rf.matchIndex[j] >= 1 {
+//			count++
+//		}
+//	}
+//	if count > len(rf.peers)/2 {
+//		rf.commitIndex = 1
+//	}
+//}
+//
+
+//if rf.commitIndex > rf.lastApplied {
+//	for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
+//		applyMsg := ApplyMsg{
+//			CommandValid: true,
+//			Command:      rf.log[i-1].Command,
+//			CommandIndex: i,
+//		}
+//		rf.applyChan <- applyMsg
+//	}
+//	rf.lastApplied = rf.commitIndex
+//}

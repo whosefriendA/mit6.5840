@@ -571,7 +571,7 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 				index1, _, ok := rf.Start(cmd)
 				if ok {
 					index = index1
-					fmt.Printf("index== %d", index)
+					fmt.Printf("index== %d\n", index)
 					break
 				}
 			}
@@ -583,9 +583,11 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 			t1 := time.Now()
 			for time.Since(t1).Seconds() < 2 {
 				nd, cmd1 := cfg.nCommitted(index)
-				fmt.Printf("nd %d", nd)
+				//fmt.Printf("nd %d", nd)
+				//fmt.Printf("expectedServers %d", expectedServers)
 				if nd > 0 && nd >= expectedServers {
 					// committed
+					//fmt.Printf("cmd %d cmd1 %d\n", cmd, cmd1)
 					if cmd1 == cmd {
 						// and it was the command we submitted.
 						return index
