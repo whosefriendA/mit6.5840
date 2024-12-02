@@ -214,6 +214,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.VoteGranted = false
 		return
 	}
+	reply.Term = rf.currentTerm
 	if args.LastLogIndex >= 0 && args.LastLogTerm < rf.log[args.LastLogIndex].Term && args.LastLogIndex < len(rf.log)-1 {
 		reply.VoteGranted = false
 		return
@@ -225,7 +226,10 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 func (rf *Raft) handleRequestVoteReply(server int, votemap map[int]bool, args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	if reply.Term >= rf.currentTerm {
+	if rf.rfstate != Candidate || args.Term < rf.currentTerm {
+		return
+	}
+	if reply.Term > rf.currentTerm {
 		rf.currentTerm = reply.Term
 		rf.rfstate = Follower
 		return
