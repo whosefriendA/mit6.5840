@@ -245,7 +245,7 @@ func (rf *Raft) handleRequestVoteReply(server int, votemap map[int]bool, args *R
 	}
 	//log.Printf("len of peers %d num %d", len(rf.peers), num)
 	if num >= len(rf.peers)/2 && rf.rfstate == Candidate {
-		log.Printf("new leader was voted")
+		log.Printf("new leader %d was voted", rf.me)
 		rf.rfstate = Leader
 		rf.nextIndex = make([]int, len(rf.peers))
 		rf.matchIndex = make([]int, len(rf.peers))
@@ -333,6 +333,7 @@ func (rf *Raft) handleAppendEntriesReply(server int, args *AppendEntriesArgs, re
 	defer rf.mu.Unlock()
 	//领导人变为跟随者
 	if reply.Term > rf.currentTerm {
+		log.Printf("new leader term  %d old term %d", reply.Term, rf.currentTerm)
 		rf.currentTerm = reply.Term
 		rf.votedFor = -1
 		rf.rfstate = Follower
