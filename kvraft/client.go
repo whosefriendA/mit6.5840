@@ -4,7 +4,6 @@ import "6.5840/labrpc"
 import "crypto/rand"
 import "math/big"
 
-
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
@@ -35,7 +34,13 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // must match the declared types of the RPC handler function's
 // arguments. and reply must be passed as a pointer.
 func (ck *Clerk) Get(key string) string {
-
+	args := &GetArgs{
+		Key: key,
+	}
+	reply := &GetReply{}
+	for !ck.servers.Call("KVServer.Get", args, reply) {
+	} // keep trying forever
+	return reply.Value
 	// You will have to modify this function.
 	return ""
 }
