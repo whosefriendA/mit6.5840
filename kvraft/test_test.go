@@ -128,12 +128,12 @@ func spawn_clients_and_wait(t *testing.T, cfg *config, ncli int, fn func(me int,
 	}
 }
 
-// predict effect of Append(k, val) if old value is prev.
+// predict effect of Append(k, val) if old Value is prev.
 func NextValue(prev string, val string) string {
 	return prev + val
 }
 
-// check that for a specific client all known appends are present in a value,
+// check that for a specific client all known appends are present in a Value,
 // and in order
 func checkClntAppends(t *testing.T, clnt int, v string, count int) {
 	lastoff := -1
@@ -154,7 +154,7 @@ func checkClntAppends(t *testing.T, clnt int, v string, count int) {
 	}
 }
 
-// check that all known appends are present in a value,
+// check that all known appends are present in a Value,
 // and are in order for each concurrent client.
 func checkConcurrentAppends(t *testing.T, v string, counts []int) {
 	nclients := len(counts)
@@ -203,7 +203,7 @@ func partitioner(t *testing.T, cfg *config, ch chan bool, done *int32) {
 // Basic test is as follows: one or more clients submitting Append/Get
 // operations to set of servers for some period of time.  After the period is
 // over, test checks that all appended values are present and in order for a
-// particular key.  If unreliable is set, RPCs may fail.  If crash is set, the
+// particular Key.  If unreliable is set, RPCs may fail.  If crash is set, the
 // servers crash after the period is over and restart.  If partitions is set,
 // the test repartitions the network concurrently with the clients and servers. If
 // maxraftstate is a positive number, the size of the state for Raft (i.e., log
@@ -286,11 +286,11 @@ func GenericTest(t *testing.T, part string, nclients int, nservers int, unreliab
 					Put(cfg, myck, key, nv, opLog, cli)
 					j++
 				} else {
-					// log.Printf("%d: client new get %v\n", cli, key)
+					// log.Printf("%d: client new get %v\n", cli, Key)
 					v := Get(cfg, myck, key, opLog, cli)
 					// the following check only makes sense when we're not using random keys
 					if !randomkeys && v != last {
-						t.Fatalf("get wrong value, key %v, wanted:\n%v\n, got\n%v\n", key, last, v)
+						t.Fatalf("get wrong Value, Key %v, wanted:\n%v\n, got\n%v\n", key, last, v)
 					}
 				}
 			}
@@ -448,7 +448,7 @@ func TestUnreliableOneKey4A(t *testing.T) {
 
 	ck := cfg.makeClient(cfg.All())
 
-	cfg.begin("Test: concurrent append to same key, unreliable (4A)")
+	cfg.begin("Test: concurrent append to same Key, unreliable (4A)")
 
 	Put(cfg, ck, "k", "", nil, -1)
 

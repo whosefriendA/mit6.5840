@@ -4,9 +4,12 @@ import (
 	"6.5840/labgob"
 	"6.5840/labrpc"
 	"6.5840/raft"
+	"bytes"
+	"fmt"
 	"log"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 const Debug = false
@@ -19,9 +22,14 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 }
 
 type Op struct {
-	// Your definitions here.
-	// Field names must start with capital letters,
-	// otherwise RPC will break.
+	Option   string
+	Key      string
+	Value    string
+	ClientId int64
+	OPID     int
+	// 这里是你的定义。
+	// 字段名称必须以大写字母开头，
+	// 否则 RPC 将中断。
 }
 
 type KVServer struct {
@@ -31,21 +39,96 @@ type KVServer struct {
 	applyCh chan raft.ApplyMsg
 	dead    int32 // set by Kill()
 
-	maxraftstate int // snapshot if log grows this big
+	data             map[string]string
+	lastOpId         map[int64]int
+	applyChan        map[int]chan Op
+	lastincludeindex int
+	maxraftstate     int // snapshot if log grows this big
 
 	// Your definitions here.
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
+	if kv.killed() {
+		reply.Err = ErrWrongLeader
+		return
+	}
+	op := Op{
+		Option:   "Get",
+		Key:      args.Key,
+		Value:    "",
+		ClientId: args.ClientID,
+		OPID:     args.OPID,
+	}
+	index, _, isLeader := kv.rf.Start(op)
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		return
+	}
+	kv.mu.Lock()
+	ch := kv.Getchan(index)
+	kv.mu.Unlock()
+	select {
+	case result := <-ch:
+		if result.OPID != args.OPID || result.ClientId != args.ClientID {
+			reply.Err = ErrWrongLeader
+		} else {
+			reply.Err = OK
+		}
+		//DPrintf("PutAppend kvMap = %v,replyErr = %v\n", kv.kvMap, reply.Err)
+	case <-time.After(100 * time.Millisecond):
+		DPrintf("PutAppend Timeout\n")
+		reply.Err = Errtimeout
+	}
+	go func() {
+		kv.mu.Lock()
+		DPrintf("%d delet chan: %d\n", kv.me, index)
+		delete(kv.applyChan, index)
+		kv.mu.Unlock()
+	}()
+
 }
 
-func (kv *KVServer) Put(args *PutAppendArgs, reply *PutAppendReply) {
+func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
-}
+	if kv.killed() {
+		reply.Err = ErrWrongLeader
+		return
+	}
 
-func (kv *KVServer) Append(args *PutAppendArgs, reply *PutAppendReply) {
-	// Your code here.
+	op := Op{Key: args.Key, Option: args.Op, ClientId: args.ClientId, OPID: args.OptionId, Value: args.Value}
+
+	index, _, isLeader := kv.rf.Start(op)
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		return
+	}
+	kv.mu.Lock()
+	ch := kv.Getchan(index)
+	kv.mu.Unlock()
+	select {
+	case result := <-ch:
+		if result.OPID != args.OptionId || result.ClientId != args.ClientId {
+			DPrintf("ErrWrongLeader: result.OPID =%d args.OPID=%d result.ClientId=%d  args.ClientId=%d\n", result.OPID, args.OptionId, result.ClientId, args.ClientId)
+			reply.Err = ErrWrongLeader
+		} else {
+			reply.Err = OK
+
+		}
+		//DPrintf("PutAppend kvMap = %v,replyErr = %v\n", kv.kvMap, reply.Err)
+
+	case <-time.After(100 * time.Millisecond):
+		DPrintf("PutAppend Timeout\n")
+		reply.Err = Errtimeout
+	}
+	go func() {
+		kv.mu.Lock()
+		DPrintf("%d delet chan: %d\n", kv.me, index)
+		delete(kv.applyChan, index)
+		kv.mu.Unlock()
+	}()
+
 }
 
 // 当 KVServer 实例不调用 Kill() 时，测试人员调用 Kill()
@@ -65,6 +148,52 @@ func (kv *KVServer) Kill() {
 func (kv *KVServer) killed() bool {
 	z := atomic.LoadInt32(&kv.dead)
 	return z == 1
+}
+
+func (kv *KVServer) Getchan(index int) chan Op {
+	ch, ok := kv.applyChan[index]
+	if !ok {
+		kv.applyChan[index] = make(chan Op, 1)
+		ch = kv.applyChan[index]
+	}
+	log.Println("a new chan :", index)
+	return ch
+}
+
+func (kv *KVServer) IsDuplicateRequest(clientId int64, OptionId int) bool {
+
+	_, ok := kv.lastOpId[clientId]
+	if ok {
+		return OptionId <= kv.lastOpId[clientId]
+	}
+	return ok
+}
+
+func (kv *KVServer) PersistSnapshot() []byte {
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(kv.data)
+	e.Encode(kv.lastOpId)
+	SnapshotBytes := w.Bytes()
+	return SnapshotBytes
+}
+
+func (kv *KVServer) ReadSnapshot(data []byte) {
+	if data == nil || len(data) < 1 {
+		return
+	}
+
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+
+	var kvMap map[string]string
+	var lastOptionId map[int64]int
+	if d.Decode(&kvMap) != nil || d.Decode(&lastOptionId) != nil {
+		fmt.Println("read persist err")
+	} else {
+		kv.data = kvMap
+		kv.lastOpId = lastOptionId
+	}
 }
 
 // servers[] 包含一组端口
@@ -93,7 +222,18 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
-	// You may need initialization code here.
-
+	//You may need initialization code here.
+	kv.data = make(map[string]string)
+	kv.applyChan = make(map[int]chan Op)
+	kv.lastOpId = make(map[int64]int)
+	kv.lastincludeindex = -1
+	snapshot := persister.ReadSnapshot()
+	kv.mu.Lock()
+	kv.ReadSnapshot(snapshot)
+	kv.mu.Unlock()
+	go kv.applier()
 	return kv
+}
+func (kv *KVServer) applier() {
+
 }
