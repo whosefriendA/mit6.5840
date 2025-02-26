@@ -22,14 +22,14 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 }
 
 type Op struct {
-	Option   string
+	// Your definitions here.
+	// Field names must start with capital letters,
+	// otherwise RPC will break.
 	Key      string
 	Value    string
+	Option   string
 	ClientId int64
-	OPID     int
-	// 这里是你的定义。
-	// 字段名称必须以大写字母开头，
-	// 否则 RPC 将中断。
+	OptionId int
 }
 
 type KVServer struct {
@@ -39,55 +39,50 @@ type KVServer struct {
 	applyCh chan raft.ApplyMsg
 	dead    int32 // set by Kill()
 
-	data             map[string]string
-	lastOpId         map[int64]int
-	applyChan        map[int]chan Op
-	lastincludeindex int
-	maxraftstate     int // snapshot if log grows this big
-
+	maxraftstate int // snapshot if log grows this big
 	// Your definitions here.
+	kvMap            map[string]string //维护一个kvMap
+	lastOptionId     map[int64]int
+	executeChan      map[int]chan Op
+	lastIncludeIndex int
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
-	// Your code here.
 	if kv.killed() {
 		reply.Err = ErrWrongLeader
 		return
 	}
-	op := Op{
-		Option:   "Get",
-		Key:      args.Key,
-		Value:    "",
-		ClientId: args.ClientID,
-		OPID:     args.OPID,
-	}
+
+	// Your code here.
+	op := Op{Key: args.Key, Option: "Get", ClientId: args.ClientId, OptionId: args.OptionId}
 	index, _, isLeader := kv.rf.Start(op)
 	if !isLeader {
 		reply.Err = ErrWrongLeader
 		return
 	}
+	//阻塞等待 - - 要设置超时时间
 	kv.mu.Lock()
-	ch := kv.Getchan(index)
+	ch := kv.GetChan(index)
 	kv.mu.Unlock()
 	select {
 	case result := <-ch:
-		if result.OPID != args.OPID || result.ClientId != args.ClientID {
+		if result.OptionId != args.OptionId || result.ClientId != args.ClientId {
 			reply.Err = ErrWrongLeader
 		} else {
+			reply.Value = result.Value
+			DPrintf("Key= %s Get value = %s\n", args.Key, result.Value)
 			reply.Err = OK
 		}
-		//DPrintf("PutAppend kvMap = %v,replyErr = %v\n", kv.kvMap, reply.Err)
+
 	case <-time.After(100 * time.Millisecond):
-		DPrintf("PutAppend Timeout\n")
-		reply.Err = Errtimeout
+		DPrintf("Get Timeout\n")
+		reply.Err = ErrTimeOut
 	}
 	go func() {
 		kv.mu.Lock()
-		DPrintf("%d delet chan: %d\n", kv.me, index)
-		delete(kv.applyChan, index)
+		delete(kv.executeChan, index)
 		kv.mu.Unlock()
 	}()
-
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
@@ -97,7 +92,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		return
 	}
 
-	op := Op{Key: args.Key, Option: args.Op, ClientId: args.ClientId, OPID: args.OptionId, Value: args.Value}
+	op := Op{Key: args.Key, Option: args.Op, ClientId: args.ClientId, OptionId: args.OptionId, Value: args.Value}
 
 	index, _, isLeader := kv.rf.Start(op)
 	if !isLeader {
@@ -105,12 +100,12 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		return
 	}
 	kv.mu.Lock()
-	ch := kv.Getchan(index)
+	ch := kv.GetChan(index)
 	kv.mu.Unlock()
 	select {
 	case result := <-ch:
-		if result.OPID != args.OptionId || result.ClientId != args.ClientId {
-			DPrintf("ErrWrongLeader: result.OPID =%d args.OPID=%d result.ClientId=%d  args.ClientId=%d\n", result.OPID, args.OptionId, result.ClientId, args.ClientId)
+		if result.OptionId != args.OptionId || result.ClientId != args.ClientId {
+			DPrintf("ErrWrongLeader: result.OptionId =%d args.OptionId=%d result.ClientId=%d  args.ClientId=%d\n", result.OptionId, args.OptionId, result.ClientId, args.ClientId)
 			reply.Err = ErrWrongLeader
 		} else {
 			reply.Err = OK
@@ -120,25 +115,25 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 
 	case <-time.After(100 * time.Millisecond):
 		DPrintf("PutAppend Timeout\n")
-		reply.Err = Errtimeout
+		reply.Err = ErrTimeOut
 	}
 	go func() {
 		kv.mu.Lock()
 		DPrintf("%d delet chan: %d\n", kv.me, index)
-		delete(kv.applyChan, index)
+		delete(kv.executeChan, index)
 		kv.mu.Unlock()
 	}()
 
 }
 
-// 当 KVServer 实例不调用 Kill() 时，测试人员调用 Kill()
-// 再次需要。为了您的方便，我们提供
-// 设置 rf.dead 的代码（不需要锁），
-// 和一个 Killed() 方法来测试 rf.dead
-// 长时间运行的循环。您也可以添加自己的
-// Kill() 的代码。你不需要做任何事
-// 关于这个，但可能很方便（例如）
-// 抑制 Kill()ed 实例的调试输出。
+// the tester calls Kill() when a KVServer instance won't
+// be needed again. for your convenience, we supply
+// code to set rf.dead (without needing a lock),
+// and a killed() method to test rf.dead in
+// long-running loops. you can also add your own
+// code to Kill(). you're not required to do anything
+// about this, but it may be convenient (for example)
+// to suppress debug output from a Kill()ed instance.
 func (kv *KVServer) Kill() {
 	atomic.StoreInt32(&kv.dead, 1)
 	kv.rf.Kill()
@@ -150,21 +145,117 @@ func (kv *KVServer) killed() bool {
 	return z == 1
 }
 
-func (kv *KVServer) Getchan(index int) chan Op {
-	ch, ok := kv.applyChan[index]
-	if !ok {
-		kv.applyChan[index] = make(chan Op, 1)
-		ch = kv.applyChan[index]
+// servers[] contains the ports of the set of
+// servers that will cooperate via Raft to
+// form the fault-tolerant key/value service.
+// me is the index of the current server in servers[].
+// the k/v server should store snapshots through the underlying Raft
+// implementation, which should call persister.SaveStateAndSnapshot() to
+// atomically save the Raft state along with the snapshot.
+// the k/v server should snapshot when Raft's saved state exceeds maxraftstate bytes,
+// in order to allow Raft to garbage-collect its log. if maxraftstate is -1,
+// you don't need to snapshot.
+// StartKVServer() must return quickly, so it should start goroutines
+// for any long-running work.
+func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister, maxraftstate int) *KVServer {
+	// call labgob.Register on structures you want
+	// Go's RPC library to marshall/unmarshall.
+	labgob.Register(Op{})
+
+	kv := new(KVServer)
+	kv.me = me
+	kv.maxraftstate = maxraftstate
+
+	// You may need initialization code here.
+
+	kv.applyCh = make(chan raft.ApplyMsg)
+	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
+
+	// You may need initialization code here.
+	kv.kvMap = make(map[string]string)
+	kv.executeChan = make(map[int]chan Op)
+	kv.lastOptionId = make(map[int64]int)
+	kv.lastIncludeIndex = -1
+	snapshot := persister.ReadSnapshot()
+	kv.mu.Lock()
+	kv.ReadSnapshot(snapshot)
+	kv.mu.Unlock()
+	go kv.applier()
+
+	return kv
+}
+
+func (kv *KVServer) applier() {
+	for !kv.killed() {
+		select {
+		case msg := <-kv.applyCh:
+			if msg.CommandValid {
+				kv.mu.Lock()
+				if msg.CommandIndex <= kv.lastIncludeIndex {
+					kv.mu.Unlock()
+					continue
+				}
+				kv.lastIncludeIndex = msg.CommandIndex
+				command := msg.Command.(Op)
+				DPrintf("%d server applyCh msg = %v\n", kv.me, msg)
+				if command.Option != "Get" && !kv.IsDuplicateRequest(command.ClientId, command.OptionId) {
+
+					switch command.Option {
+
+					case "Append":
+						kv.kvMap[command.Key] += command.Value
+
+					case "Put":
+						kv.kvMap[command.Key] = command.Value
+					}
+
+					kv.lastOptionId[command.ClientId] = command.OptionId
+				}
+				if command.Option == "Get" {
+					command.Value = kv.kvMap[command.Key]
+					DPrintf("%d server applyCh msg = %v, value = %v\n", kv.me, msg, command.Value)
+				}
+
+				if _, isLeader := kv.rf.GetState(); isLeader {
+					kv.GetChan(msg.CommandIndex) <- command
+				}
+				if kv.maxraftstate != -1 && kv.rf.RaftStateSize() >= kv.maxraftstate {
+					DPrintf("%d server PersistSnapshot, index = %v\n", kv.me, msg.CommandIndex)
+					kv.rf.Snapshot(msg.CommandIndex, kv.PersistSnapshot())
+				}
+				kv.mu.Unlock()
+			}
+
+			if msg.SnapshotValid {
+				kv.mu.Lock()
+				DPrintf("%d SnapshotValid: kv.lastIncludeIndex =%d, msg.SnapshotIndex=%d\n", kv.me, kv.lastIncludeIndex, msg.SnapshotIndex)
+				kv.ReadSnapshot(msg.Snapshot)
+				kv.lastIncludeIndex = msg.SnapshotIndex
+
+				kv.mu.Unlock()
+			}
+
+		}
+
 	}
-	log.Println("a new chan :", index)
+}
+
+func (kv *KVServer) GetChan(index int) chan Op {
+
+	ch, ok := kv.executeChan[index]
+	if !ok {
+		kv.executeChan[index] = make(chan Op, 1)
+		ch = kv.executeChan[index]
+	}
+	//log.Println("create chan index", index)
 	return ch
 }
 
 func (kv *KVServer) IsDuplicateRequest(clientId int64, OptionId int) bool {
 
-	_, ok := kv.lastOpId[clientId]
+	_, ok := kv.lastOptionId[clientId]
 	if ok {
-		return OptionId <= kv.lastOpId[clientId]
+		return OptionId <= kv.lastOptionId[clientId]
 	}
 	return ok
 }
@@ -172,8 +263,8 @@ func (kv *KVServer) IsDuplicateRequest(clientId int64, OptionId int) bool {
 func (kv *KVServer) PersistSnapshot() []byte {
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
-	e.Encode(kv.data)
-	e.Encode(kv.lastOpId)
+	e.Encode(kv.kvMap)
+	e.Encode(kv.lastOptionId)
 	SnapshotBytes := w.Bytes()
 	return SnapshotBytes
 }
@@ -191,49 +282,7 @@ func (kv *KVServer) ReadSnapshot(data []byte) {
 	if d.Decode(&kvMap) != nil || d.Decode(&lastOptionId) != nil {
 		fmt.Println("read persist err")
 	} else {
-		kv.data = kvMap
-		kv.lastOpId = lastOptionId
+		kv.kvMap = kvMap
+		kv.lastOptionId = lastOptionId
 	}
-}
-
-// servers[] 包含一组端口
-// 将通过 Raft 进行协作的服务器
-// 形成容错键/值服务。
-// me 是当前服务器在servers[]中的索引。
-// k/v服务器应该通过底层Raft存储快照
-// 实现，应该调用 persister.SaveStateAndSnapshot() 来
-// 以原子方式保存 Raft 状态和快照。
-// 当 Raft 保存的状态超过 maxraftstate 字节时，k/v 服务器应该快照，
-// 为了允许 Raft 对其日志进行垃圾收集。如果 maxraftstate 为 -1，
-// 你不需要快照。
-// StartKVServer() 必须快速返回，因此它应该启动 goroutine
-// 对于任何长时间运行的工作。
-func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister, maxraftstate int) *KVServer {
-	// call labgob.Register on structures you want
-	// Go's RPC library to marshall/unmarshall.
-	labgob.Register(Op{})
-
-	kv := new(KVServer)
-	kv.me = me
-	kv.maxraftstate = maxraftstate
-
-	// You may need initialization code here.
-
-	kv.applyCh = make(chan raft.ApplyMsg)
-	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
-
-	//You may need initialization code here.
-	kv.data = make(map[string]string)
-	kv.applyChan = make(map[int]chan Op)
-	kv.lastOpId = make(map[int64]int)
-	kv.lastincludeindex = -1
-	snapshot := persister.ReadSnapshot()
-	kv.mu.Lock()
-	kv.ReadSnapshot(snapshot)
-	kv.mu.Unlock()
-	go kv.applier()
-	return kv
-}
-func (kv *KVServer) applier() {
-
 }

@@ -32,8 +32,8 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	return ck
 }
 
-// fetch the current Value for a Key.
-// returns "" if the Key does not exist.
+// fetch the current value for a key.
+// returns "" if the key does not exist.
 // keeps trying forever in the face of all other errors.
 //
 // you can send an RPC with code like this:
@@ -45,11 +45,11 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 func (ck *Clerk) Get(key string) string {
 	// You will have to modify this function.
 	DPrintf("触发Get\n")
-	args := &GetArgs{Key: key, ClientID: ck.ClientId, OPID: ck.OptionId}
+	args := &GetArgs{Key: key, ClientId: ck.ClientId, OptionId: ck.OptionId}
 	reply := &GetReply{}
 	for {
 		ok := ck.servers[ck.Leader].Call("KVServer.Get", args, reply)
-		if !ok || reply.Err == ErrWrongLeader || reply.Err == Errtimeout {
+		if !ok || reply.Err == ErrWrongLeader || reply.Err == ErrTimeOut {
 			ck.Leader = (ck.Leader + 1) % len(ck.servers)
 			reply.Err = ""
 		} else {
@@ -77,7 +77,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	reply := &PutAppendReply{}
 	for {
 		ok := ck.servers[ck.Leader].Call("KVServer.PutAppend", args, reply)
-		if !ok || reply.Err == ErrWrongLeader || reply.Err == Errtimeout {
+		if !ok || reply.Err == ErrWrongLeader || reply.Err == ErrTimeOut {
 			ck.Leader = (ck.Leader + 1) % len(ck.servers)
 			reply.Err = ""
 		} else {
