@@ -1,11 +1,11 @@
 package shardkv
 
 //
-// client code to talk to a sharded key/value service.
+// 与分片键/值服务对话的客户端代码。
 //
-// the client first talks to the shardctrler to find out
-// the assignment of shards (keys) to groups, and then
-// talks to the group that holds the key's shard.
+// 客户端首先与 shardctrler 对话以找出答案
+// 将分片（键）分配给组，然后
+// 与持有密钥分片的组对话。
 //
 
 import "6.5840/labrpc"
@@ -14,9 +14,9 @@ import "math/big"
 import "6.5840/shardctrler"
 import "time"
 
-// which shard is a key in?
-// please use this function,
-// and please do not change it.
+// 哪个分片是关键？
+// 请使用这个函数，
+// 请不要更改它。
 func key2shard(key string) int {
 	shard := 0
 	if len(key) > 0 {
@@ -40,13 +40,13 @@ type Clerk struct {
 	// You will have to modify this struct.
 }
 
-// the tester calls MakeClerk.
+// 测试人员调用 MakeClerk。
 //
-// ctrlers[] is needed to call shardctrler.MakeClerk().
+// 调用 shardctrler.MakeClerk() 需要 ctrlers[]。
 //
-// make_end(servername) turns a server name from a
-// Config.Groups[gid][i] into a labrpc.ClientEnd on which you can
-// send RPCs.
+// make_end(servername) 将服务器名称从
+// Config.Groups[gid][i] 到 labrpc.ClientEnd 中，您可以在其中
+// 发送 RPC。
 func MakeClerk(ctrlers []*labrpc.ClientEnd, make_end func(string) *labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.sm = shardctrler.MakeClerk(ctrlers)
@@ -55,10 +55,10 @@ func MakeClerk(ctrlers []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 	return ck
 }
 
-// fetch the current value for a key.
-// returns "" if the key does not exist.
-// keeps trying forever in the face of all other errors.
-// You will have to modify this function.
+// 获取键的当前值。
+// 如果键不存在则返回“”。
+// 面对所有其他错误，不断尝试。
+// 你必须修改这个函数。
 func (ck *Clerk) Get(key string) string {
 	args := GetArgs{}
 	args.Key = key
@@ -89,14 +89,13 @@ func (ck *Clerk) Get(key string) string {
 	return ""
 }
 
-// shared by Put and Append.
-// You will have to modify this function.
+// 由 Put 和 Append 共享。
+// 你必须修改这个函数。
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	args := PutAppendArgs{}
 	args.Key = key
 	args.Value = value
 	args.Op = op
-
 
 	for {
 		shard := key2shard(key)

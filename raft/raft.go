@@ -21,8 +21,6 @@ import (
 	"6.5840/labgob"
 	"bytes"
 	"fmt"
-	"log"
-
 	//	"bytes"
 	"math/rand"
 	"sync"
@@ -119,7 +117,7 @@ type AppendEntriesReply struct {
 	// Your data here (2A).
 	Term            int
 	Success         bool
-	FastGoBackIndex int //快速回退index
+	FastGoBackIndex int
 	FastGoBackTerm  int
 }
 
@@ -151,13 +149,6 @@ func (rf *Raft) GetState() (int, bool) {
 // (or nil if there's not yet a snapshot).
 func (rf *Raft) persist() {
 	// Your code here (2C).
-	w := new(bytes.Buffer)
-	e := labgob.NewEncoder(w)
-	e.Encode(rf.currentTerm)
-	e.Encode(rf.votedFor)
-	e.Encode(rf.log)
-	raftstate := w.Bytes()
-	rf.persister.Save(raftstate, nil)
 	// Example:
 	// w := new(bytes.Buffer)
 	// e := labgob.NewEncoder(w)
@@ -165,6 +156,15 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// raftstate := w.Bytes()
 	// rf.persister.Save(raftstate, nil)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.log)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.lastIncludedIndex)
+	e.Encode(rf.lastIncludedTerm)
+	raftstate := w.Bytes()
+	rf.persister.Save(raftstate, rf.persister.ReadSnapshot())
 }
 
 // restore previously persisted state.
@@ -172,21 +172,7 @@ func (rf *Raft) readPersist(data []byte) {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		return
 	}
-	r := bytes.NewBuffer(data)
-	d := labgob.NewDecoder(r)
-	var term int
-	var votefor int
-	var logs []Entries
-	if d.Decode(&term) != nil ||
-		d.Decode(&votefor) != nil || d.Decode(&logs) != nil {
-		log.Printf("Error decoding persisted state")
-		return
-	} else {
-		rf.currentTerm = term
-		rf.votedFor = votefor
-		rf.log = logs
-	}
-	//Your code here (2C).
+	// Your code here (2C).
 	// Example:
 	// r := bytes.NewBuffer(data)
 	// d := labgob.NewDecoder(r)
@@ -199,16 +185,46 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.xxx = xxx
 	//   rf.yyy = yyy
 	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+
+	var term int
+	var log []Entries
+	var voteFor int
+	var lastIncludeIndex int
+	var lastIncludeTerm int
+	if d.Decode(&term) != nil || d.Decode(&log) != nil || d.Decode(&voteFor) != nil || d.Decode(&lastIncludeIndex) != nil || d.Decode(&lastIncludeTerm) != nil {
+		fmt.Println("read persist err")
+	} else {
+		rf.log = log
+		rf.currentTerm = term
+		rf.votedFor = voteFor
+		rf.lastIncludedIndex = lastIncludeIndex
+		rf.lastIncludedTerm = lastIncludeTerm
+	}
 
 }
-
-// the service says it has created a snapshot that has
-// all info up to and including index. this means the
-// service no longer needs the log through (and including)
-// that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
-
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	firstIndex := rf.GetFirstIndex()
+	if index > firstIndex {
+		sLogs := make([]Entries, 0)
+		rf.lastIncludedIndex = index - 1
+		rf.lastIncludedTerm = rf.log[index-firstIndex-1].Term
+		rf.log = append(sLogs, rf.log[index-firstIndex:]...)
+		DPrintf("%d [snapshot]: rf.log: %v\n", rf.me, rf.log)
+		w := new(bytes.Buffer)
+		e := labgob.NewEncoder(w)
+		e.Encode(rf.currentTerm)
+		e.Encode(rf.log)
+		e.Encode(rf.votedFor)
+		e.Encode(rf.lastIncludedIndex)
+		e.Encode(rf.lastIncludedTerm)
+		raftstate := w.Bytes()
+		rf.persister.Save(raftstate, snapshot)
+	}
 }
 
 type InstallSnapshotArgs struct {
@@ -224,12 +240,122 @@ type InstallSnapshotReply struct {
 }
 
 func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	reply.Term = rf.currentTerm
+	if args.Term < rf.currentTerm {
+		return
+	}
+	rf.IsGetHeartbeat <- 0
+	rf.currentTerm = args.Term
+	rf.votedFor = -1
+	rf.isleader = false
+	rf.state = Follower
+	if args.LastIncludeIndex < rf.commitIndex {
+		rf.persist()
+		return
+	}
+	if rf.waitingIndex-1 < args.LastIncludeIndex {
+		rf.waitingSnapshot = args.Data
+		rf.waitingTerm = args.LastIncludeTerm
+		rf.waitingIndex = args.LastIncludeIndex + 1
+	}
 
+	rf.commitIndex = args.LastIncludeIndex + 1
+	rf.lastApplied = rf.commitIndex
+
+	if rf.commitIndex >= rf.GetAllLogLen() {
+		tempLog := make([]Entries, 0)
+		rf.log = tempLog
+	} else {
+		tempLog := make([]Entries, 0)
+		DPrintf("install snapshot append lastindex %d,rf.lastindex %d\n", args.LastIncludeIndex, rf.lastIncludedIndex)
+		rf.log = append(tempLog, rf.log[args.LastIncludeIndex-rf.lastIncludedIndex:]...)
+	}
+	rf.lastIncludedTerm = args.LastIncludeTerm
+	rf.lastIncludedIndex = args.LastIncludeIndex
+	DPrintf("term = %d,get snapshot from %d to %d\n", rf.currentTerm, args.LeaderId, rf.me)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.log)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.lastIncludedIndex)
+	e.Encode(rf.lastIncludedTerm)
+	raftstate := w.Bytes()
+	rf.persister.Save(raftstate, args.Data)
+
+	rf.applyCond.Broadcast()
+	return
 }
 
 func (rf *Raft) SendInstallSnapshot(i int) {
+	rf.mu.Lock()
+	args := &InstallSnapshotArgs{}
+	reply := &InstallSnapshotReply{}
+	args.Term = rf.currentTerm
+	args.LeaderId = rf.me
+	args.LastIncludeTerm = rf.lastIncludedTerm
+	args.LastIncludeIndex = rf.lastIncludedIndex
+	args.Data = rf.persister.ReadSnapshot()
+	DPrintf("SendInstallSnapshot lastIncludedIndex %d to %d\n", rf.lastIncludedIndex, i)
+	rf.mu.Unlock()
+	ok := rf.peers[i].Call("Raft.InstallSnapshot", args, reply)
+	DPrintf("installSnapshot ok = %v\n", ok)
+	if ok {
+		rf.mu.Lock()
+		defer rf.mu.Unlock()
+		if rf.state != Leader {
+			return
+		}
+		if reply.Term > rf.currentTerm {
+			rf.currentTerm = args.Term
+			rf.votedFor = -1
+			rf.isleader = false
+			rf.state = Follower // 重置选举时间?
+			rf.persist()
+			return
+		}
+		newNext := args.LastIncludeIndex + 1
+		newMatch := args.LastIncludeIndex
+		if newNext > rf.nextIndex[i] {
+			rf.nextIndex[i] = newNext
+		}
+		if newMatch > rf.matchIndex[i] {
+			rf.matchIndex[i] = newMatch
+		}
+	}
 
 }
+
+// the service says it has created a snapshot that has
+// all info up to and including index. this means the
+// service no longer needs the log through (and including)
+// that index. Raft should now trim its log as much as possible.
+//func (rf *Raft) Snapshot(index int, snapshot []byte) {
+//	// Your code here (2D).
+//
+//}
+//
+//type InstallSnapshotArgs struct {
+//	Term             int
+//	LeaderId         int
+//	LastIncludeIndex int
+//	LastIncludeTerm  int
+//	Data             []byte
+//}
+//
+//type InstallSnapshotReply struct {
+//	Term int
+//}
+//
+//func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+//
+//}
+//
+//func (rf *Raft) SendInstallSnapshot(i int) {
+//
+//}
 
 func (rf *Raft) applier() {
 	rf.mu.Lock()
@@ -774,7 +900,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		for {
 			select {
 			case <-Ticker.C:
-				//开始选举
 
 				rf.Ticker.Reset(time.Duration(300+(rand.Int63()%150)) * time.Millisecond)
 				if rf.state == Follower || rf.state == Candidate {
@@ -806,11 +931,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 						LastLogTerm:  llTerm,
 					}
 
-					//先投自己一票
 					rf.votedFor = me
 					rf.persist()
 					count := 1
-					fmt.Println("[candidate]", rf.me, rf.currentTerm, time.Now())
+					DPrintf("[candidate] %d %d %v", rf.me, rf.currentTerm, time.Now())
 					for v := range rf.peers {
 						if v == rf.me {
 							continue
@@ -819,7 +943,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 							reply := RequestVoteReply{}
 							var ok bool = false
 							ok = rf.sendRequestVote(v, args, &reply)
-							fmt.Println("who send vote ", v, reply, rf.isleader, rf.state, rf.currentTerm)
+							DPrintf("who send vote %d %v %v %d %d", v, reply, rf.isleader, rf.state, rf.currentTerm)
 							if ok {
 								rf.mu.Lock()
 
@@ -835,14 +959,14 @@ func Make(peers []*labrpc.ClientEnd, me int,
 									if rf.currentTerm == args.Term {
 										*count += 1
 									}
-									fmt.Println("[count num]", *count, rf.me)
+									DPrintf("[count num] %d %d", *count, rf.me)
 									if *count > len(rf.peers)/2 {
 										*count = 0
 										rf.isleader = true
 										rf.state = Leader
 
 										rf.persist()
-										fmt.Println("[election leader]", rf.me)
+										DPrintf("[election leader] %d", rf.me)
 										for i := range rf.nextIndex {
 											rf.nextIndex[i] = rf.GetAllLogLen()
 											rf.matchIndex[i] = -1
@@ -870,7 +994,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 				}
 
-			case <-rf.IsGetHeartbeat: //收到心跳
+			case <-rf.IsGetHeartbeat:
 				rf.Ticker.Reset(time.Duration(300+(rand.Int63()%150)) * time.Millisecond)
 			}
 		}
