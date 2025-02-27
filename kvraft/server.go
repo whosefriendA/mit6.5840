@@ -41,9 +41,9 @@ type KVServer struct {
 
 	maxraftstate int // snapshot if log grows this big
 	// Your definitions here.
-	kvMap            map[string]string //维护一个kvMap
+	kvData           map[string]string //维护一个kvMap
 	lastOptionId     map[int64]int
-	executeChan      map[int]chan Op
+	optionChan       map[int]chan Op
 	lastIncludeIndex int
 }
 
@@ -80,7 +80,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	}
 	go func() {
 		kv.mu.Lock()
-		delete(kv.executeChan, index)
+		delete(kv.optionChan, index)
 		kv.mu.Unlock()
 	}()
 }
@@ -111,7 +111,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 			reply.Err = OK
 
 		}
-		//DPrintf("PutAppend kvMap = %v,replyErr = %v\n", kv.kvMap, reply.Err)
+		//DPrintf("PutAppend kvData = %v,replyErr = %v\n", kv.kvData, reply.Err)
 
 	case <-time.After(100 * time.Millisecond):
 		DPrintf("PutAppend Timeout\n")
@@ -120,7 +120,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	go func() {
 		kv.mu.Lock()
 		DPrintf("%d delet chan: %d\n", kv.me, index)
-		delete(kv.executeChan, index)
+		delete(kv.optionChan, index)
 		kv.mu.Unlock()
 	}()
 
@@ -172,8 +172,8 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
-	kv.kvMap = make(map[string]string)
-	kv.executeChan = make(map[int]chan Op)
+	kv.kvData = make(map[string]string)
+	kv.optionChan = make(map[int]chan Op)
 	kv.lastOptionId = make(map[int64]int)
 	kv.lastIncludeIndex = -1
 	snapshot := persister.ReadSnapshot()
@@ -203,16 +203,16 @@ func (kv *KVServer) applier() {
 					switch command.Option {
 
 					case "Append":
-						kv.kvMap[command.Key] += command.Value
+						kv.kvData[command.Key] += command.Value
 
 					case "Put":
-						kv.kvMap[command.Key] = command.Value
+						kv.kvData[command.Key] = command.Value
 					}
 
 					kv.lastOptionId[command.ClientId] = command.OptionId
 				}
 				if command.Option == "Get" {
-					command.Value = kv.kvMap[command.Key]
+					command.Value = kv.kvData[command.Key]
 					DPrintf("%d server applyCh msg = %v, value = %v\n", kv.me, msg, command.Value)
 				}
 
@@ -242,10 +242,10 @@ func (kv *KVServer) applier() {
 
 func (kv *KVServer) GetChan(index int) chan Op {
 
-	ch, ok := kv.executeChan[index]
+	ch, ok := kv.optionChan[index]
 	if !ok {
-		kv.executeChan[index] = make(chan Op, 1)
-		ch = kv.executeChan[index]
+		kv.optionChan[index] = make(chan Op, 1)
+		ch = kv.optionChan[index]
 	}
 	//log.Println("create chan index", index)
 	return ch
@@ -263,7 +263,7 @@ func (kv *KVServer) IsDuplicateRequest(clientId int64, OptionId int) bool {
 func (kv *KVServer) PersistSnapshot() []byte {
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
-	e.Encode(kv.kvMap)
+	e.Encode(kv.kvData)
 	e.Encode(kv.lastOptionId)
 	SnapshotBytes := w.Bytes()
 	return SnapshotBytes
@@ -282,7 +282,7 @@ func (kv *KVServer) ReadSnapshot(data []byte) {
 	if d.Decode(&kvMap) != nil || d.Decode(&lastOptionId) != nil {
 		fmt.Println("read persist err")
 	} else {
-		kv.kvMap = kvMap
+		kv.kvData = kvMap
 		kv.lastOptionId = lastOptionId
 	}
 }
